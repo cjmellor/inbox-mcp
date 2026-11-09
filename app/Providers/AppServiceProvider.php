@@ -2,7 +2,7 @@
 
 namespace App\Providers;
 
-use App\Imap\MailReader;
+use App\Imap\MailboxFolders;
 use DirectoryTree\ImapEngine\Mailbox;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
@@ -13,7 +13,7 @@ class AppServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
-        $this->app->singleton(MailReader::class, fn () => new MailReader(
+        $this->app->singleton(MailboxFolders::class, fn () => new MailboxFolders(
             new Mailbox(config('services.imap')),
             config('services.mcp.hidden_folders'),
         ));

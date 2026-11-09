@@ -6,7 +6,7 @@ use Tests\TestCase;
 
 class MailServerTest extends TestCase
 {
-    public function test_every_tool_is_registered_and_read_only(): void
+    public function test_reading_tools_are_read_only_and_writing_tools_are_not(): void
     {
         config(['services.mcp.token_hashes' => ['claude-code' => hash('sha256', 'known-token')]]);
 
@@ -15,14 +15,20 @@ class MailServerTest extends TestCase
             ->assertOk()
             ->json('result.tools');
 
-        $this->assertSame([
+        $reading = [
             'list-folders', 'get-folder-status', 'get-storage-quota',
             'search-messages', 'search-all-folders', 'count-messages',
             'get-message', 'get-message-headers', 'get-thread', 'get-attachment',
-        ], array_column($tools, 'name'));
+        ];
+        $writing = [
+            'update-message-flags', 'move-messages', 'trash-messages', 'mark-as-spam',
+            'create-folder', 'rename-folder', 'create-draft', 'send-email',
+        ];
+
+        $this->assertSame([...$reading, ...$writing], array_column($tools, 'name'));
 
         foreach ($tools as $tool) {
-            $this->assertTrue($tool['annotations']['readOnlyHint'], "{$tool['name']} is not read-only");
+            $this->assertSame(in_array($tool['name'], $reading, true), $tool['annotations']['readOnlyHint'] ?? false, "{$tool['name']} has the wrong readOnlyHint");
         }
     }
 }

@@ -7,18 +7,13 @@ use DirectoryTree\ImapEngine\Address;
 use DirectoryTree\ImapEngine\BodyStructurePart;
 use DirectoryTree\ImapEngine\Connection\ImapQueryBuilder;
 use DirectoryTree\ImapEngine\Exceptions\ImapCapabilityException;
-use DirectoryTree\ImapEngine\Exceptions\ImapCommandException;
-use DirectoryTree\ImapEngine\Exceptions\ImapConnectionException;
 use DirectoryTree\ImapEngine\FolderInterface;
-use DirectoryTree\ImapEngine\MailboxInterface;
 use DirectoryTree\ImapEngine\Message;
 use DirectoryTree\ImapEngine\MessageInterface;
 use DirectoryTree\ImapEngine\MessageQueryInterface;
 use DirectoryTree\ImapEngine\Support\BodyPartDecoder;
-use DirectoryTree\ImapEngine\Support\Str as ImapStr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\ItemNotFoundException;
-use Illuminate\Support\Str;
 use ZBateson\MailMimeParser\Header\IHeaderPart;
 
 class MailReader
@@ -31,20 +26,14 @@ class MailReader
 
     private const int MAX_THREAD_REFERENCES = 25;
 
-    /**
-     * @param  list<string>  $hiddenFolders
-     */
-    public function __construct(
-        private MailboxInterface $mailbox,
-        private array $hiddenFolders = [],
-    ) {}
+    public function __construct(private MailboxFolders $folders) {}
 
     /**
      * @return list<array{name: string, flags: list<string>}>
      */
     public function folders(): array
     {
-        return $this->visibleFolders()
+        return $this->folders->visible()
             ->map(fn (FolderInterface $folder) => [
                 'name' => $this->pathOf($folder),
                 'flags' => array_values($folder->flags()),
@@ -58,7 +47,7 @@ class MailReader
      */
     public function status(?string $folder = null): array
     {
-        $folders = $folder === null ? $this->visibleFolders() : collect([$this->folder($folder)]);
+        $folders = $folder === null ? $this->folders->visible() : collect([$this->folders->find($folder)]);
 
         return $folders
             ->map(function (FolderInterface $folder) {
@@ -81,7 +70,7 @@ class MailReader
     public function quota(): array
     {
         try {
-            $roots = $this->mailbox()->inbox()->quota();
+            $roots = $this->folders->mailbox()->inbox()->quota();
         } catch (ImapCapabilityException) {
             throw new MailboxUnavailable('This mail server does not report storage quotas.');
         }
@@ -99,7 +88,7 @@ class MailReader
      */
     public function search(string $folder, array $criteria, int $limit, int $page = 1): array
     {
-        return $this->searchIn($this->folder($folder), $criteria, $limit, $page);
+        return $this->searchIn($this->folders->find($folder), $criteria, $limit, $page);
     }
 
     /**
@@ -108,7 +97,7 @@ class MailReader
      */
     public function searchAllFolders(array $criteria, int $limit): array
     {
-        return $this->visibleFolders()
+        return $this->folders->visible()
             ->flatMap(fn (FolderInterface $folder) => collect($this->searchIn($folder, $criteria, $limit))
                 ->map(fn (array $summary) => ['folder' => $this->pathOf($folder), ...$summary]))
             ->sortByDesc(fn (array $summary) => $this->chronologicalKey($summary))
@@ -122,7 +111,7 @@ class MailReader
      */
     public function count(string $folder, array $criteria): int
     {
-        $query = $this->folder($folder)->messages();
+        $query = $this->folders->find($folder)->messages();
 
         $this->applyCriteria($query, $criteria);
 
@@ -184,6 +173,24 @@ class MailReader
     }
 
     /**
+     * @return array{subject: ?string, message_id: ?string, references: list<string>}|null
+     */
+    public function replyHeaders(string $folder, int $uid): ?array
+    {
+        $message = $this->find($folder, $uid);
+
+        if ($message === null) {
+            return null;
+        }
+
+        return [
+            'subject' => $message->subject(),
+            'message_id' => filled($message->messageId()) ? trim($message->messageId(), '<>') : null,
+            'references' => $this->threadIds($message)->map(fn (string $id) => trim($id, '<>'))->all(),
+        ];
+    }
+
+    /**
      * @return list<array<string, mixed>>|null
      */
     public function thread(string $folder, int $uid): ?array
@@ -194,19 +201,9 @@ class MailReader
             return null;
         }
 
-        $ownId = $message->messageId();
+        $ids = $this->threadIds($message);
 
-        $ids = collect($message->header('References')?->getParts() ?? [])
-            ->map(fn (IHeaderPart $part) => $part->getValue())
-            ->merge($message->inReplyTo())
-            ->push($ownId)
-            ->filter()
-            ->map(fn (string $id) => str_starts_with($id, '<') ? $id : "<{$id}>")
-            ->unique()
-            ->take(-self::MAX_THREAD_REFERENCES)
-            ->values();
-
-        return $this->visibleFolders()
+        return $this->folders->visible()
             ->flatMap(function (FolderInterface $folder) use ($ids) {
                 $query = $folder->messages()->withHeaders()->withFlags()->withSize()->limit(100);
 
@@ -252,49 +249,25 @@ class MailReader
         ];
     }
 
-    private function mailbox(): MailboxInterface
-    {
-        try {
-            $this->mailbox->connect();
-        } catch (ImapCommandException) {
-            throw new MailboxUnavailable('The mail server rejected the login. If this account uses an app-specific password, it may have been revoked.');
-        } catch (ImapConnectionException) {
-            throw new MailboxUnavailable('Could not reach the mail server. Try again shortly.');
-        }
-
-        return $this->mailbox;
-    }
-
     /**
-     * @return Collection<int, FolderInterface>
+     * @return Collection<int, string>
      */
-    private function visibleFolders(): Collection
+    private function threadIds(Message $message): Collection
     {
-        return collect($this->mailbox()->folders()->get())
-            ->reject(fn (FolderInterface $folder) => $this->isHidden($this->pathOf($folder), $folder->delimiter()))
-            ->reject(fn (FolderInterface $folder) => in_array('\\Noselect', $folder->flags(), true))
+        return collect($message->header('References')?->getParts() ?? [])
+            ->map(fn (IHeaderPart $part) => $part->getValue())
+            ->merge($message->inReplyTo())
+            ->push($message->messageId())
+            ->filter()
+            ->map(fn (string $id) => str_starts_with($id, '<') ? $id : "<{$id}>")
+            ->unique()
+            ->take(-self::MAX_THREAD_REFERENCES)
             ->values();
-    }
-
-    private function folder(string $path): FolderInterface
-    {
-        // find() sends the path to LIST as a pattern, so * and % would match folders isHidden() never saw.
-        if (Str::contains($path, ['*', '%']) || $this->isHidden($path)) {
-            throw UnknownFolder::named($path);
-        }
-
-        $folder = $this->mailbox()->folders()->find($path);
-
-        if ($folder === null || $this->isHidden($this->pathOf($folder), $folder->delimiter())) {
-            throw UnknownFolder::named($path);
-        }
-
-        return $folder;
     }
 
     private function pathOf(FolderInterface $folder): string
     {
-        return ImapStr::fromImapUtf7($folder->path());
+        return $this->folders->pathOf($folder);
     }
 
     /**
@@ -325,7 +298,7 @@ class MailReader
 
     private function find(string $folder, int $uid): ?Message
     {
-        $message = $this->folder($folder)->messages()
+        $message = $this->folders->find($folder)->messages()
             ->withHeaders()
             ->withFlags()
             ->withSize()
@@ -333,13 +306,6 @@ class MailReader
             ->find($uid);
 
         return $message instanceof Message ? $message : null;
-    }
-
-    private function isHidden(string $path, string $delimiter = '/'): bool
-    {
-        return collect($this->hiddenFolders)->contains(
-            fn (string $hidden) => $path === $hidden || str_starts_with($path, $hidden.$delimiter),
-        );
     }
 
     /**

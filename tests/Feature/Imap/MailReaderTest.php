@@ -3,6 +3,7 @@
 namespace Tests\Feature\Imap;
 
 use App\Imap\AttachmentTooLarge;
+use App\Imap\MailboxFolders;
 use App\Imap\MailboxUnavailable;
 use App\Imap\MailReader;
 use App\Imap\UnknownFolder;
@@ -320,7 +321,7 @@ class MailReaderTest extends TestCase
         $this->expectException(MailboxUnavailable::class);
         $this->expectExceptionMessage('The mail server rejected the login.');
 
-        (new MailReader($this->lazyMailbox($stream)))->folders();
+        new MailReader(new MailboxFolders($this->lazyMailbox($stream)))->folders();
     }
 
     public function test_an_unreachable_server_is_reported_as_unavailable(): void
@@ -332,7 +333,7 @@ class MailReaderTest extends TestCase
         $this->expectException(MailboxUnavailable::class);
         $this->expectExceptionMessage('Could not reach the mail server.');
 
-        (new MailReader($this->lazyMailbox($stream)))->folders();
+        new MailReader(new MailboxFolders($this->lazyMailbox($stream)))->folders();
     }
 
     /**
@@ -347,7 +348,7 @@ class MailReaderTest extends TestCase
         $mailbox = new Mailbox(['host' => 'imap.example.test', 'username' => 'user', 'password' => 'secret']);
         $mailbox->connect(new ImapConnection($stream));
 
-        return [$stream, new MailReader($mailbox, ['Notes', 'Bills & Receipts'])];
+        return [$stream, new MailReader(new MailboxFolders($mailbox, ['Notes', 'Bills & Receipts']))];
     }
 
     private function lazyMailbox(FakeStream $stream): Mailbox

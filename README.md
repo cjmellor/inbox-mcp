@@ -1,8 +1,8 @@
 # inbox-mcp
 
-A small, self-hosted [MCP](https://modelcontextprotocol.io) server that gives AI agents **read-only** access to an email mailbox over IMAP. Built with Laravel 13, [laravel/mcp](https://github.com/laravel/mcp) and [ImapEngine](https://github.com/DirectoryTree/ImapEngine).
+A small, self-hosted [MCP](https://modelcontextprotocol.io) server that gives AI agents access to an email mailbox over IMAP and SMTP. Built with Laravel 13, [laravel/mcp](https://github.com/laravel/mcp) and [ImapEngine](https://github.com/DirectoryTree/ImapEngine).
 
-Run it on your own server, give each agent its own token, and they can search and read your mail. They can't send, move, delete or flag it.
+Run it on your own server, give each agent its own token, and they can search, read, flag, file and draft your mail, and send it. Nothing is ever permanently deleted.
 
 Tested against iCloud Mail, including iCloud+ custom email domains. It should work with any IMAP server that accepts a username and password over TLS.
 
@@ -39,6 +39,14 @@ Read this before following the steps below. They are written for people, so the 
 | `get-message-headers` | Every raw header, e.g. `Received` or `Authentication-Results`, useful for checking SPF, DKIM and DMARC. |
 | `get-thread` | Every message in the same conversation, across all folders and including your sent replies, oldest first. |
 | `get-attachment` | Reads one attachment. Text-based files come back as text and images as images, up to 5 MB. PDFs and other binary files aren't supported. |
+| `update-message-flags` | Marks up to 50 messages read or unread, and flagged or unflagged. |
+| `move-messages` | Moves up to 50 messages to another folder. Also how to restore mail from Trash or Junk. |
+| `trash-messages` | Moves messages to Trash. Never expunges them from Trash. |
+| `mark-as-spam` | Moves messages to Junk. |
+| `create-folder` | Creates a folder. |
+| `rename-folder` | Renames a folder. INBOX, Drafts, Sent, Trash and Junk can't be renamed. |
+| `create-draft` | Saves a plain-text draft, optionally as a reply in an existing thread. |
+| `send-email` | Sends a plain-text email over SMTP, optionally as a reply, and saves a copy to Sent. |
 
 All three search tools take the same filters:
 - `from`, `to`, `cc`, `bcc`, `subject`, `body`, `text`
@@ -46,16 +54,16 @@ All three search tools take the same filters:
 - `larger_than`, `smaller_than`
 - `unread_only`, `flagged_only`, `answered_only`
 
-Every tool is marked read-only (`readOnlyHint`) for clients that check.
+The reading tools are marked read-only (`readOnlyHint`). `trash-messages`, `mark-as-spam`, `move-messages`, `rename-folder` and `send-email` are treated as destructive, so clients that check will ask before running them.
 
 ## How it keeps your mailbox safe
 
-- **No write path.** No code sends mail or changes, moves or deletes messages. Messages are fetched with `BODY.PEEK`, so reading one never marks it as read.
-- **Email is treated as untrusted.** Every result is wrapped in randomly named markers and a warning that the content was written by email senders, not by you. Prompt injection through email is a real risk: anyone who can send you mail can write text your agent will read. Avoid giving the same agent a tool that can send data out (web requests, sending email) unless you trust what it reads.
+- **No permanent deletion.** Nothing expunges messages from Trash or deletes folders. Messages are fetched with `BODY.PEEK`, so reading one never marks it as read.
+- **Email is treated as untrusted.** Every result is wrapped in randomly named markers and a warning that the content was written by email senders, not by you. Prompt injection through email is a real risk: anyone who can send you mail can write text your agent will read, and `send-email` can send data out. Prefer `create-draft` and send it yourself, and make sure your client asks before running destructive tools.
 - **Attachments are fetched only on request.** `get-message` lists them by name, type and size. Only `get-attachment` downloads one, and only text-based files and images up to 5 MB.
 - **One bearer token per client.** Only SHA-256 hashes are stored, so you can revoke one client without touching the others.
 - **Rate limited** to 60 requests a minute.
-- **Hidden folders.** Folders you list in `MCP_HIDDEN_FOLDERS`, and everything under them, are invisible to the tools.
+- **Hidden folders.** Folders you list in `MCP_HIDDEN_FOLDERS`, and everything under them, are invisible to the tools. Mail can't be moved into them, no folder can be created or renamed under those names, and a folder that contains one can't be renamed.
 
 ## Requirements
 
@@ -111,6 +119,9 @@ composer test
 | `MCP_HIDDEN_FOLDERS` | – | Comma-separated folders to hide, along with their subfolders, e.g. `Notes` |
 | `MCP_TOKEN_HASHES` | – | Comma-separated `client:sha256` pairs from `php artisan mcp:token` |
 | `CACHE_STORE` | `file` | Used by the rate limiter. Leave it as `file` unless you have Redis. |
+| `MAIL_HOST`, `MAIL_PORT` | – | SMTP server for `send-email`, e.g. `smtp.mail.me.com` and `587` |
+| `MAIL_USERNAME`, `MAIL_PASSWORD` | – | SMTP login; usually the same app-specific password as IMAP |
+| `MAIL_FROM_ADDRESS`, `MAIL_FROM_NAME` | – | Sender for sent mail and drafts. Must be an address the account can send from. |
 
 ### iCloud Mail
 
@@ -118,6 +129,11 @@ composer test
 IMAP_HOST=imap.mail.me.com
 IMAP_USERNAME=yourname          # the part of your @icloud.com address before the @
 IMAP_PASSWORD=xxxx-xxxx-xxxx-xxxx
+MAIL_HOST=smtp.mail.me.com
+MAIL_PORT=587
+MAIL_USERNAME=yourname@icloud.com
+MAIL_PASSWORD=xxxx-xxxx-xxxx-xxxx
+MAIL_FROM_ADDRESS=you@example.com
 MCP_HIDDEN_FOLDERS=Notes
 ```
 
@@ -126,6 +142,8 @@ MCP_HIDDEN_FOLDERS=Notes
 - **Custom domains:** mail for every address on the account lands in one mailbox. To narrow a search to a custom domain, pass the domain as `to`, e.g. `to: "example.com"`.
 - **Notes:** iCloud stores Notes in IMAP folders. Hide them with `MCP_HIDDEN_FOLDERS=Notes`.
 - **Empty searches:** iCloud leaves out the `* SEARCH` line when a search finds nothing, which ImapEngine treats as an error. This app handles it and returns no results.
+- **Moving mail:** iCloud doesn't support IMAP `MOVE`, so messages are copied, marked deleted and expunged. If other messages in the source folder are already marked deleted, the expunge is skipped so they aren't lost, and the tool says so.
+- **Special folders:** iCloud flags only Trash and Sent. Drafts and Junk are found by their names, `Drafts` and `Junk`.
 
 ## Deploy to a server
 
